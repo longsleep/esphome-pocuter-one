@@ -1,0 +1,6 @@
+venv/
+.esphome/
+secrets.yaml
+__pycache__/
+mockups/fonts/
+mockups/*.py

@@ -1,0 +1,418 @@
+substitutions:
+  name: pocuter
+  friendly_name: Pocuter
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  # One file for every board. Each one comes up as pocuter-xxxxxx, the last
+  # three bytes of its MAC, so they do not fight over one hostname.
+  name_add_mac_suffix: true
+
+esp32:
+  board: esp32-c3-devkitm-1
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+external_components:
+  # Local on purpose. aw9523b is M5Stack's driver (MIT, from
+  # github.com/m5stack/esphome-yaml at cc708dd) with one fix, see
+  # components/aw9523b/aw9523b.h. ESPHome itself has no AW9523 support as of
+  # 2026.9. mxc4005 is ours, nothing upstream drives the accelerometer.
+  - source:
+      type: local
+      path: components
+    components: [aw9523b, mxc4005]
+
+# GPIO20 and GPIO21 are the UART0 pins, and the board uses them for the
+# expander INT line and the SD card CS. Logs go out over the native USB port.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${friendly_name} Setup
+
+captive_portal:
+
+time:
+  # No timezone here, so Home Assistant can push its own on every sync.
+  - platform: homeassistant
+    id: ha_time
+  # Fallback for a boot with no Home Assistant. No RTC on the board, so until
+  # one of these answers the display shows dashes.
+  - platform: sntp
+    id: sntp_time
+    timezone: !secret timezone
+
+# Everything below the ESP32-C3 hangs off this bus: the AW9523B at 0x5B and the
+# MXC4005XC at 0x15. The board has 2.7k pullups on both lines. 400kHz matters,
+# because the OLED CS and D/C lines are expander pins and every SPI command
+# costs several expander writes.
+i2c:
+  id: bus_i2c
+  sda: GPIO8
+  scl: GPIO9  # also the BOOT strap, the unmarked fifth switch shorts it to GND
+  frequency: 400kHz
+
+# Shared by the OLED and the micro SD slot (CS GPIO21). The OLED is write only.
+spi:
+  id: bus_spi
+  clk_pin: GPIO5
+  mosi_pin: GPIO6
+  miso_pin: GPIO10
+
+aw9523b:
+  - id: expander
+    i2c_id: bus_i2c
+    address: 0x5B  # AD0 and AD1 both tied high
+    # P0 carries the OLED CS and the 12.5V enable, and nothing on the board
+    # pulls them up. The chip default, open drain, leaves the display dead.
+    # The Pocuter library writes GCR 0x13, which is this plus 1/4 current.
+    p0_drive_mode: PUSH_PULL
+    # Ceiling for the LED mode sinks. The RGB LED has 2.7k series resistors,
+    # so the resistor sets the current long before this does. Matches stock.
+    led_max_current: 9.25mA
+    # Open drain, 10k pullup on the board. Only pins with use_interrupt raise it.
+    interrupt_pin:
+      number: GPIO20
+      mode:
+        input: true
+
+# Expander pin numbers: P0_n is n, P1_n is 8 + n.
+#
+#   0  P0_0  LED blue (LED mode)     8  P1_0  header P2
+#   1  P0_1  button 3                9  P1_1  header P1
+#   2  P0_2  OLED 12.5V enable      10  P1_2  LED red (LED mode)
+#   3  P0_3  charger STAT           11  P1_3  LED green (LED mode)
+#   4  P0_4  SD card detect         12  P1_4  OLED reset
+#   5  P0_5  button 2               13  P1_5  OLED D/C
+#   6  P0_6  button 1               14  P1_6  header P4
+#   7  P0_7  OLED CS                15  P1_7  header P3
+
+switch:
+  # Enables the boost converter that makes the 12.5V OLED panel supply. The
+  # controller answers every command without it, so a missing enable looks
+  # like a dead display. Off means the panel is dark and draws nothing. The controller keeps its RAM on 3.3V, so the picture
+  # comes back as it was. The interval that drives the display skips its
+  # frames while this is off, since each one blocks the main loop on SPI and
+  # expander writes.
+  - platform: gpio
+    id: oled_power
+    name: Display
+    icon: mdi:monitor
+    restore_mode: RESTORE_DEFAULT_ON
+    pin:
+      aw9523b_id: expander
+      number: 2
+      mode:
+        output: true
+
+output:
+  # LED mode pins sink a constant current, and the LED is common anode to 3.3V,
+  # so a higher value is a brighter LED. No inversion.
+  - platform: aw9523b
+    id: led_red
+    aw9523b_id: expander
+    pin: 10
+  - platform: aw9523b
+    id: led_green
+    aw9523b_id: expander
+    pin: 11
+  - platform: aw9523b
+    id: led_blue
+    aw9523b_id: expander
+    pin: 0
+
+light:
+  - platform: rgb
+    id: led
+    name: LED
+    red: led_red
+    green: led_green
+    blue: led_blue
+    restore_mode: RESTORE_DEFAULT_OFF
+    effects:
+      - pulse:
+
+# Charger STAT timing, written by charger_stat below, and the clock pulse
+# flag, written by the interval that drives the display.
+globals:
+  - id: stat_low_since
+    type: uint32_t
+    initial_value: "0"
+  - id: stat_last_blip
+    type: uint32_t
+    initial_value: "0"
+  - id: clock_pulse
+    type: bool
+    initial_value: "false"
+
+# The display has no update_interval of its own. Once a second it draws the
+# time at 40px, then 150ms later at the normal 50px, so the number beats.
+# Two frames a second, about 33ms each at 8MHz SPI.
+# Nothing draws while the Display switch is off.
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            switch.is_on: oled_power
+          then:
+            - lambda: id(clock_pulse) = true;
+            - component.update: oled
+            - delay: 150ms
+            - lambda: id(clock_pulse) = false;
+            - component.update: oled
+
+# No behavior attached to the buttons on purpose. Home Assistant is the control
+# surface. The two unlabeled switches next to them are EN (reset) and BOOT.
+binary_sensor:
+  - platform: gpio
+    id: button_1
+    name: Button 1
+    pin:
+      aw9523b_id: expander
+      number: 6
+      mode:
+        input: true
+      inverted: true  # 10k pullup, switch to GND
+      use_interrupt: true
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+  - platform: gpio
+    id: button_2
+    name: Button 2
+    pin:
+      aw9523b_id: expander
+      number: 5
+      mode:
+        input: true
+      inverted: true
+      use_interrupt: true
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+  - platform: gpio
+    id: button_3
+    name: Button 3
+    pin:
+      aw9523b_id: expander
+      number: 1
+      mode:
+        input: true
+      inverted: true
+      use_interrupt: true
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+
+  # MCP73831 STAT, raw. Low while charging, high when charged or on battery
+  # power (10k pullup). With no cell fitted the charger keeps restarting into
+  # an empty output, and STAT drops for 3 to 20ms about every 10s (measured on
+  # this board). Charging and Battery Present below are derived from it.
+  - platform: gpio
+    id: charger_stat
+    internal: true
+    pin:
+      aw9523b_id: expander
+      number: 3
+      mode:
+        input: true
+      inverted: true
+      use_interrupt: true
+    on_press:
+      - lambda: id(stat_low_since) = millis();
+    on_release:
+      - lambda: |-
+          if (millis() - id(stat_low_since) < 500)
+            id(stat_last_blip) = millis();
+
+  # A real charge holds STAT low for minutes, so a second filters out the
+  # no-battery blips.
+  - platform: template
+    id: charging
+    name: Charging
+    device_class: battery_charging
+    lambda: return id(charger_stat).state && millis() - id(stat_low_since) > 1000;
+
+  # Card detect switch closes to GND with a card in, 10k pullup otherwise.
+  - platform: gpio
+    id: sd_card
+    name: SD Card
+    icon: mdi:micro-sd
+    entity_category: diagnostic
+    pin:
+      aw9523b_id: expander
+      number: 4
+      mode:
+        input: true
+      inverted: true
+      use_interrupt: true
+
+  # No blip for five minutes means a cell is there: charging, charged, or
+  # running the board. The expander only sees a blip if its read lands inside
+  # the pulse, so some are missed and gaps of over a minute happen (measured).
+  # Unknown for the first 30s after boot until the first blip had a chance.
+  - platform: template
+    id: battery_present
+    name: Battery Present
+    icon: mdi:battery-heart-variant
+    entity_category: diagnostic
+    lambda: |-
+      uint32_t blip = id(stat_last_blip);
+      if (blip != 0 && millis() - blip < 5 * 60 * 1000)
+        return false;
+      if (blip == 0 && millis() < 30000)
+        return {};
+      return true;
+
+sensor:
+  # VBAT through a 1.2M / 1.2M divider. The divider is high impedance, so the
+  # first ADC sample after a long idle reads low. The median hides it.
+  - platform: adc
+    id: battery_voltage
+    name: Battery Voltage
+    pin: GPIO2
+    attenuation: 12db
+    update_interval: 10s
+    accuracy_decimals: 2
+    device_class: voltage
+    entity_category: diagnostic
+    filters:
+      - multiply: 2.0
+      - median:
+          window_size: 6
+          send_every: 6
+
+  # Linear between 3.3V and 4.15V. A LiPo curve is anything but linear, and
+  # the reading sits high while charging. Good for a glance, not for a gauge.
+  # Unknown without a cell, rather than a made up 100%.
+  - platform: template
+    id: battery_level
+    name: Battery
+    unit_of_measurement: "%"
+    device_class: battery
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (std::isnan(v) || !id(battery_present).has_state() || !id(battery_present).state)
+        return NAN;
+      return clamp((v - 3.3f) / (4.15f - 3.3f) * 100.0f, 0.0f, 100.0f);
+
+  # Photodiode into an MCP6001 transimpedance stage. Brighter is higher. Not
+  # calibrated to lux, so it stays a voltage. Indoor light only gets a few
+  # tens of millivolts out of it, so this reads at 0dB (0 to about 0.9V) like
+  # the Pocuter library does. Direct sun clips.
+  - platform: adc
+    id: light_level
+    name: Light Sensor
+    pin: GPIO1
+    attenuation: 0db
+    update_interval: 10s
+    accuracy_decimals: 3
+    icon: mdi:brightness-5
+
+  - platform: mxc4005
+    i2c_id: bus_i2c
+    update_interval: 10s
+    acceleration_x:
+      name: Acceleration X
+    acceleration_y:
+      name: Acceleration Y
+    acceleration_z:
+      name: Acceleration Z
+    temperature:
+      name: Board Temperature
+      entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 60s
+    entity_category: diagnostic
+
+font:
+  # Jersey 10 is drawn on a 10 unit pixel grid. At 50px every font pixel is
+  # exactly 5 panel pixels, so 1 bpp stays sharp and anti-aliasing would only
+  # blur it. 50 is also the largest such size where the widest time, 23:39,
+  # fits (86px); proportional digits make 11:11 half as wide.
+  - file: gfonts://Jersey 10
+    id: font_time
+    size: 50
+    glyphs: "0123456789-"
+  # The pulse frame. 40px is 4x the pixel grid, so it is just as sharp.
+  - file: gfonts://Jersey 10
+    id: font_time_pulse
+    size: 40
+    glyphs: "0123456789-"
+  - file: gfonts://Roboto
+    id: font_small
+    size: 11
+
+display:
+  - platform: ssd1331_spi
+    id: oled
+    spi_id: bus_spi
+    cs_pin:
+      aw9523b_id: expander
+      number: 7
+      mode:
+        output: true
+    dc_pin:
+      aw9523b_id: expander
+      number: 13
+      mode:
+        output: true
+    reset_pin:
+      aw9523b_id: expander
+      number: 12
+      mode:
+        output: true
+    # Proven on this panel. The Pocuter library pushes 80MHz, the SSD1331
+    # datasheet says 6.6MHz. 40MHz raises a full frame from 30 to 42 fps.
+    data_rate: 8MHz
+    # OLED, and a clock is the worst case for burn in. Stock ran the master
+    # current at 5 of 15.
+    brightness: 60%
+    update_interval: never
+    lambda: |-
+      auto now = id(ha_time).now();
+      if (!now.is_valid())
+        now = id(sntp_time).now();
+      // Four digits, no colon: the beat replaces the blinking colon. The
+      // digits are proportional, so the string is centred as a whole and
+      // moves slightly as the time changes. Both sizes centre their digits on
+      // y 27: baseline 41 for the 28px tall 50px font, 38 for the 21px 40px.
+      bool pulse = id(clock_pulse);
+      auto *font = pulse ? id(font_time_pulse) : id(font_time);
+      int baseline = pulse ? 38 : 41;
+      if (now.is_valid()) {
+        it.strftime(48, baseline, font, Color(255, 255, 255), TextAlign::BASELINE_CENTER, "%H%M", now);
+      } else {
+        it.print(48, baseline, font, Color(120, 120, 120), TextAlign::BASELINE_CENTER, "----");
+      }
+
+      // Voltage only once a cell is known to be there, so a board without one
+      // never shows it, not even in the first 30s after boot.
+      float bv = id(battery_voltage).state;
+      bool cell = id(battery_present).has_state() && id(battery_present).state;
+      if (cell && !std::isnan(bv)) {
+        it.printf(2, 62, id(font_small), Color(160, 160, 160), TextAlign::BOTTOM_LEFT, "%.2fV%s", bv,
+                  id(charging).state ? " +" : "");
+      }
+      // Network state as a steady dot: green with Home Assistant, amber on
+      // WiFi only, red offline. The beat of the digits shows the clock runs.
+      Color dot = id(ha_time).now().is_valid() && api::global_api_server->is_connected()
+                      ? Color(0, 200, 0)
+                      : wifi::global_wifi_component->is_connected() ? Color(220, 140, 0) : Color(200, 0, 0);
+      it.filled_circle(90, 56, 3, dot);
