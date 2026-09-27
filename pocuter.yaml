@@ -43,6 +43,16 @@ safe_mode:
 # The clock works without either, and a reboot without WiFi loses the time.
 api:
   reboot_timeout: 0s
+  actions:
+    # Scrolls a message through once, like the weekday ticker, then the clock
+    # carries on as usual. A message sent while another one waits replaces it.
+    - action: ticker_message
+      variables:
+        message: string
+      then:
+        - script.execute:
+            id: queue_ticker_message
+            message: !lambda return message;
 
 ota:
   - platform: esphome
@@ -168,11 +178,16 @@ globals:
   - id: clock_pulse
     type: bool
     initial_value: "false"
-  # millis() when the weekday ticker started, 0 while it is not running, and
-  # the minute it last ran in, so it runs once per minute.
+  # The ticker: millis() when it started (0 while it is not running), the
+  # text it scrolls, a message from Home Assistant waiting for its turn, and
+  # the minute the weekday last ran in, so that runs once per minute.
   - id: ticker_start
     type: uint32_t
     initial_value: "0"
+  - id: ticker_text
+    type: std::string
+  - id: ticker_pending
+    type: std::string
   - id: ticker_minute
     type: int
     initial_value: "-1"
@@ -183,7 +198,9 @@ globals:
 #
 # From second 30 of every minute the weekday name scrolls through instead:
 # the clock slides out to the left, the name follows, and the clock slides
-# back in to where it started. The beat pauses meanwhile, and the 40ms
+# back in to where it started. A message from Home Assistant scrolls the same
+# way, once, as soon as no ticker is running; the weekday then waits for it
+# until second 35 at the latest. The beat pauses meanwhile, and the 40ms
 # interval draws about 25 frames a second until the display lambda ends it.
 #
 # Nothing draws while the Display switch is off.
@@ -198,9 +215,16 @@ interval:
                 auto now = id(ha_time).now();
                 if (!now.is_valid())
                   now = id(sntp_time).now();
-                if (id(ticker_start) == 0 && now.is_valid() && now.second >= 30 &&
-                    now.second < 35 && now.minute != id(ticker_minute)) {
+                if (id(ticker_start) != 0)
+                  return;
+                if (!id(ticker_pending).empty()) {
+                  id(ticker_text) = id(ticker_pending);
+                  id(ticker_pending).clear();
+                  id(ticker_start) = millis() | 1;
+                } else if (now.is_valid() && now.second >= 30 && now.second < 35 &&
+                           now.minute != id(ticker_minute)) {
                   id(ticker_minute) = now.minute;
+                  id(ticker_text) = now.strftime("%A");
                   id(ticker_start) = millis() | 1;
                 }
             - if:
@@ -391,6 +415,67 @@ sensor:
     update_interval: 60s
     entity_category: diagnostic
 
+# Cleans a message once, before it waits for the ticker. Typographic
+# punctuation from Home Assistant becomes ASCII, and every other character the
+# clock font lacks is dropped: drawing one would log a warning twice per frame.
+script:
+  - id: queue_ticker_message
+    parameters:
+      message: string
+    then:
+      - lambda: |-
+          static const struct { uint32_t from; const char *to; } MAP[] = {
+              {0x2013, "-"}, {0x2014, "-"}, {0x2212, "-"}, {0x2018, "'"}, {0x2019, "'"},
+              {0x201C, "\""}, {0x201D, "\""}, {0x201E, "\""}, {0x2026, "..."}, {0x00A0, " "},
+          };
+          std::string out;
+          size_t i = 0;
+          while (i < message.size()) {
+            uint8_t c = message[i];
+            uint32_t cp;
+            size_t len;
+            if (c < 0x80) {
+              cp = c, len = 1;
+            } else if ((c >> 5) == 0x6 && i + 1 < message.size()) {
+              cp = ((c & 0x1F) << 6) | (message[i + 1] & 0x3F), len = 2;
+            } else if ((c >> 4) == 0xE && i + 2 < message.size()) {
+              cp = ((c & 0x0F) << 12) | ((message[i + 1] & 0x3F) << 6) | (message[i + 2] & 0x3F), len = 3;
+            } else if ((c >> 3) == 0x1E && i + 3 < message.size()) {
+              cp = ((c & 0x07) << 18) | ((message[i + 1] & 0x3F) << 12) | ((message[i + 2] & 0x3F) << 6) |
+                   (message[i + 3] & 0x3F),
+              len = 4;
+            } else {
+              i++;
+              continue;
+            }
+            const char *repl = nullptr;
+            for (const auto &m : MAP)
+              if (m.from == cp)
+                repl = m.to;
+            if (repl != nullptr)
+              out += repl;
+            else if (cp == '\n' || cp == '\t')
+              out += ' ';
+            else if (id(font_time)->find_glyph(cp) != nullptr)
+              out.append(message, i, len);
+            i += len;
+          }
+          id(ticker_pending) = out;
+
+# The dashboard way to send a ticker message: setting it, even to the same
+# text again, scrolls it through once.
+text:
+  - platform: template
+    name: Ticker Message
+    icon: mdi:message-text
+    mode: text
+    max_length: 255
+    optimistic: true
+    set_action:
+      - script.execute:
+          id: queue_ticker_message
+          message: !lambda return x;
+
 button:
   - platform: restart
     name: Restart
@@ -404,8 +489,9 @@ font:
   - file: gfonts://Jersey 10
     id: font_time
     size: 50
-    # Digits plus every letter of the English weekday names.
-    glyphs: "0123456789-FMSTWadehinorstuy"
+    # Printable ASCII plus German umlauts, for the weekday and for messages
+    # from Home Assistant. Anything else is skipped when drawn.
+    glyphs: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ÄÖÜäöüß°€"
   # The pulse frame. 40px is 4x the pixel grid, so it is just as sharp.
   - file: gfonts://Jersey 10
     id: font_time_pulse
@@ -453,24 +539,24 @@ display:
       auto *font = pulse ? id(font_time_pulse) : id(font_time);
       int baseline = pulse ? 38 : 41;
       Color white(255, 255, 255);
-      // Weekday ticker: one strip scrolled left, clock, gap, weekday, gap,
-      // clock. It starts and ends with the clock exactly where it normally
-      // sits, so the last frame hands over to the plain clock seamlessly.
+      // Ticker: one strip scrolled left, clock, gap, text, gap, clock. It
+      // starts and ends with the clock exactly where it normally sits, so the
+      // last frame hands over to the plain clock seamlessly.
       bool scrolling = false;
-      if (id(ticker_start) != 0 && now.is_valid()) {
+      if (id(ticker_start) != 0) {
         static const int GAP = 24;
         static const int SPEED = 60;  // px per second
-        std::string clock = now.strftime("%H%M");
-        std::string day = now.strftime("%A");
-        int x1, y1, w_clock, w_day, h;
+        std::string clock = now.is_valid() ? now.strftime("%H%M") : "----";
+        const std::string &text = id(ticker_text);
+        int x1, y1, w_clock, w_text, h;
         it.get_text_bounds(0, 0, clock.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_clock, &h);
-        it.get_text_bounds(0, 0, day.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_day, &h);
-        int total = w_clock + GAP + w_day + GAP;
+        it.get_text_bounds(0, 0, text.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_text, &h);
+        int total = w_clock + GAP + w_text + GAP;
         int off = (millis() - id(ticker_start)) * SPEED / 1000;
         if (off < total) {
           int x = 48 - w_clock / 2 - off;
           it.print(x, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
-          it.print(x + w_clock + GAP, 41, id(font_time), white, TextAlign::BASELINE_LEFT, day.c_str());
+          it.print(x + w_clock + GAP, 41, id(font_time), white, TextAlign::BASELINE_LEFT, text.c_str());
           it.print(x + total, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
           scrolling = true;
         }

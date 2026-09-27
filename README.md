@@ -88,6 +88,8 @@ then enter the key in Home Assistant.
   in the same font: the clock slides out to the left, the name follows, and
   the clock slides back in to its usual place, at 60 px/s (about 4 to 5
   seconds). The beat pauses meanwhile.
+- A message from Home Assistant scrolls through the same way, once, as soon
+  as no ticker is running, see [Ticker messages](#ticker-messages).
 - 50 px is the largest such size where the widest time (23:39, 86 px) fits.
   The digits are proportional, so the number is centred as a whole and moves
   a little as the time changes.
@@ -100,6 +102,28 @@ then enter the key in Home Assistant.
   25 fps while it runs, and both skip drawing while the Display switch is
   off. Fonts are Google fonts downloaded at compile time, so compiling needs
   internet.
+
+### Ticker messages
+
+| Control | Effect |
+|---|---|
+| Action `esphome.<devicename>_ticker_message` (`message`) | Scrolls the message through once |
+| Ticker Message (text) | Same from the dashboard; setting the same text again scrolls it again |
+
+A message waits for a running ticker to finish; a newer one replaces a
+message that is still waiting. At second 30 the weekday waits for a message
+until second 35 at the latest, otherwise it skips that minute. The clock font
+has printable ASCII, German umlauts, `°` and `€`. Dashes, typographic quotes
+and `…` are turned into ASCII, and any other character is dropped. Messages
+move at the same 60 px/s, so a long one takes a while: 40 characters are
+about 15 s.
+
+```yaml
+# Home Assistant automation action (devicename "pocuter-7ac098")
+action: esphome.pocuter_7ac098_ticker_message
+data:
+  message: "Washing machine done"
+```
 
 ## Entities
 
@@ -116,6 +140,7 @@ then enter the key in Home Assistant.
 | Board Temperature | sensor (diagnostic) | The accelerometer's die, tracks the board rather than the room |
 | SD Card | binary sensor (diagnostic) | Card detect only |
 | WiFi Signal | sensor (diagnostic) | |
+| Ticker Message | text | See [Ticker messages](#ticker-messages) |
 | Restart | button (config) | Orderly reboot |
 
 ### Not exposed
