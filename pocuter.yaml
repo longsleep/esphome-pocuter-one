@@ -355,6 +355,11 @@ sensor:
     update_interval: 60s
     entity_category: diagnostic
 
+button:
+  - platform: restart
+    name: Restart
+    entity_category: config
+
 font:
   # Jersey 10 is drawn on a 10 unit pixel grid. At 50px every font pixel is
   # exactly 5 panel pixels, so 1 bpp stays sharp and anti-aliasing would only

@@ -111,6 +111,7 @@ then enter the key in Home Assistant.
 | Board Temperature | sensor (diagnostic) | The accelerometer's die, tracks the board rather than the room |
 | SD Card | binary sensor (diagnostic) | Card detect only |
 | WiFi Signal | sensor (diagnostic) | |
+| Restart | button (config) | Orderly reboot |
 
 ### Not exposed
 
