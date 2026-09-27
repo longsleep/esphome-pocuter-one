@@ -124,10 +124,10 @@ aw9523b:
 switch:
   # Enables the boost converter that makes the 12.5V OLED panel supply. The
   # controller answers every command without it, so a missing enable looks
-  # like a dead display. Off means the panel is dark and draws nothing. The controller keeps its RAM on 3.3V, so the picture
-  # comes back as it was. The interval that drives the display skips its
-  # frames while this is off, since each one blocks the main loop on SPI and
-  # expander writes.
+  # like a dead display. Off means the panel is dark and draws nothing. The
+  # controller keeps its RAM on 3.3V, so the picture comes back as it was. The
+  # interval that drives the display skips its frames while this is off, since
+  # each one blocks the main loop on SPI and expander writes.
   - platform: gpio
     id: oled_power
     name: Display
@@ -138,6 +138,29 @@ switch:
       number: 2
       mode:
         output: true
+
+  # What the clock does besides showing the time. Restored across reboots.
+  - platform: template
+    id: clock_beat
+    name: Clock Beat
+    icon: mdi:heart-pulse
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: weekday_ticker
+    name: Weekday Ticker
+    icon: mdi:calendar-week
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: date_ticker
+    name: Date Ticker
+    icon: mdi:calendar
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
 
 output:
   # LED mode pins sink a constant current, and the LED is common anode to 3.3V,
@@ -196,6 +219,9 @@ globals:
 # time at 40px, then 150ms later at the normal 50px, so the number beats.
 # Two frames a second, about 33ms each at 8MHz SPI.
 #
+# The Clock Beat, Weekday Ticker and Date Ticker switches below turn the
+# parts off; without the beat the clock simply redraws once a second.
+#
 # From second 30 of every minute the weekday name scrolls through instead:
 # the clock slides out to the left, the name follows, and the clock slides
 # back in to where it started. A message from Home Assistant scrolls the same
@@ -221,21 +247,34 @@ interval:
                   id(ticker_text) = id(ticker_pending);
                   id(ticker_pending).clear();
                   id(ticker_start) = millis() | 1;
-                } else if (now.is_valid() && now.second >= 30 && now.second < 35 &&
-                           now.minute != id(ticker_minute)) {
+                } else if ((id(weekday_ticker).state || id(date_ticker).state) && now.is_valid() &&
+                           now.second >= 30 && now.second < 35 && now.minute != id(ticker_minute)) {
+                  // Weekday first, then the date, two spaces apart (21px,
+                  // about the 24px the strip leaves around the clock).
+                  std::string text;
+                  if (id(weekday_ticker).state)
+                    text = now.strftime("%A");
+                  if (id(date_ticker).state)
+                    text += (text.empty() ? "" : "  ") + now.strftime("%Y-%m-%d");
                   id(ticker_minute) = now.minute;
-                  id(ticker_text) = now.strftime("%A");
+                  id(ticker_text) = text;
                   id(ticker_start) = millis() | 1;
                 }
             - if:
                 condition:
                   lambda: return id(ticker_start) == 0;
                 then:
-                  - lambda: id(clock_pulse) = true;
-                  - component.update: oled
-                  - delay: 150ms
-                  - lambda: id(clock_pulse) = false;
-                  - component.update: oled
+                  - if:
+                      condition:
+                        switch.is_on: clock_beat
+                      then:
+                        - lambda: id(clock_pulse) = true;
+                        - component.update: oled
+                        - delay: 150ms
+                        - lambda: id(clock_pulse) = false;
+                        - component.update: oled
+                      else:
+                        - component.update: oled
   - interval: 40ms
     then:
       - if:

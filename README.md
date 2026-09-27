@@ -88,6 +88,11 @@ then enter the key in Home Assistant.
   in the same font: the clock slides out to the left, the name follows, and
   the clock slides back in to its usual place, at 60 px/s (about 4 to 5
   seconds). The beat pauses meanwhile.
+- The Clock Beat, Weekday Ticker and Date Ticker switches pick what the clock
+  does besides showing the time. Date Ticker adds the date as `YYYY-MM-DD`;
+  with both on the ticker shows the weekday first, then the date
+  (`Sunday  2026-09-27`, 8 to 9 seconds). With neither, nothing scrolls at
+  second 30. Without the beat the clock just redraws once a second.
 - A message from Home Assistant scrolls through the same way, once, as soon
   as no ticker is running, see [Ticker messages](#ticker-messages).
 - 50 px is the largest such size where the widest time (23:39, 86 px) fits.
@@ -140,6 +145,7 @@ data:
 | Board Temperature | sensor (diagnostic) | The accelerometer's die, tracks the board rather than the room |
 | SD Card | binary sensor (diagnostic) | Card detect only |
 | WiFi Signal | sensor (diagnostic) | |
+| Clock Beat / Weekday Ticker / Date Ticker | switch (config) | See [Clock](#clock); on / on / off by default, restored across reboots |
 | Ticker Message | text | See [Ticker messages](#ticker-messages) |
 | Restart | button (config) | Orderly reboot |
 
