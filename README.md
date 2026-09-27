@@ -145,6 +145,7 @@ data:
 | Board Temperature | sensor (diagnostic) | The accelerometer's die, tracks the board rather than the room |
 | SD Card | binary sensor (diagnostic) | Card detect only |
 | WiFi Signal | sensor (diagnostic) | |
+| Display Brightness | number (config, %) | 1–40, default 35, restored across reboots. Scales the SSD1331 colour contrasts; very low values dim unevenly. See [Display](#display) |
 | Clock Beat / Weekday Ticker / Date Ticker | switch (config) | See [Clock](#clock); on / on / off by default, restored across reboots |
 | Ticker Message | text | See [Ticker messages](#ticker-messages) |
 | Restart | button (config) | Orderly reboot |
@@ -213,7 +214,16 @@ Also needed on this board:
   ESPHome's `ssd1331_spi` adds a 1 ms delay per command. Measured with a
   free-running display: 30 fps at 8 MHz SPI, 42 fps at 40 MHz. About 21 ms per
   frame is that fixed overhead, and a free-running display owns the main loop.
-- Brightness is 60 % to go easy on the OLED.
+- Display Brightness changes the brightness without a redraw. Its 100 %
+  would be the panel datasheet's nominal setting (80–100 cd/m² white), rated
+  for 10,000 hours to half brightness. A clock lights the same pixels all day,
+  and they wear unevenly: the digits burn in. So the range stops at 40 %,
+  the ceiling for all-day use, and defaults to 35 %. Dimming it further at
+  night, or turning the Display switch off when nobody looks, adds lifetime
+  on top.
+- The switches and the brightness are saved to flash at most once a minute
+  (ESPHome's default `flash_write_interval`). A change followed by a power
+  loss within that minute is lost; the Restart button saves first.
 
 ### Battery
 

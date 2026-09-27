@@ -8,6 +8,19 @@ esphome:
   # One file for every board. Each one comes up as pocuter-xxxxxx, the last
   # three bytes of its MAC, so they do not fight over one hostname.
   name_add_mac_suffix: true
+  # A restored number does not run its set_action, so the saved display
+  # brightness is applied here, once everything including the display is up.
+  # A value saved before the range was narrowed is clamped into it and saved.
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          auto *n = id(display_brightness);
+          float b = std::isnan(n->state) ? 35.0f
+                                         : clamp(n->state, n->traits.get_min_value(), n->traits.get_max_value());
+          if (b != n->state)
+            n->make_call().set_value(b).perform();
+          id(oled)->set_brightness(b / 100.0f);
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -501,6 +514,29 @@ script:
           }
           id(ticker_pending) = out;
 
+# Scales the three SSD1331 colour contrasts, a few commands and no redraw.
+# 100% is the panel datasheet's nominal setting (80-100 cd/m2 white), rated
+# 10,000 hours to half brightness. A clock lights the same pixels all day, so
+# those wear unevenly and burn in; 40% is the ceiling for all-day use and 35%
+# the default. Very low values dim unevenly, since each colour's contrast is
+# rounded to whole steps.
+number:
+  - platform: template
+    id: display_brightness
+    name: Display Brightness
+    icon: mdi:brightness-6
+    entity_category: config
+    unit_of_measurement: "%"
+    mode: slider
+    min_value: 1
+    max_value: 40
+    step: 1
+    initial_value: 35
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: id(oled)->set_brightness(x / 100.0f);
+
 # The dashboard way to send a ticker message: setting it, even to the same
 # text again, scrolls it through once.
 text:
@@ -562,9 +598,8 @@ display:
     # Proven on this panel. The Pocuter library pushes 80MHz, the SSD1331
     # datasheet says 6.6MHz. 40MHz raises a full frame from 30 to 42 fps.
     data_rate: 8MHz
-    # OLED, and a clock is the worst case for burn in. Stock ran the master
-    # current at 5 of 15.
-    brightness: 60%
+    # Only the value until on_boot applies the Display Brightness number.
+    brightness: 35%
     update_interval: never
     lambda: |-
       auto now = id(ha_time).now();
