@@ -30,7 +30,19 @@ external_components:
 logger:
   hardware_uart: USB_SERIAL_JTAG
 
+# The clock has to come up on every power-up, whatever happened before.
+# ESPHome's safe_mode counts boots that end within a minute in flash, and
+# after 10 of them starts only WiFi and OTA for 5 minutes: dark display. A
+# cell running flat resets the board exactly like that, so it is off. This
+# also turns off OTA rollback, which needs safe_mode; a broken build needs USB
+# to recover.
+safe_mode:
+  disabled: true
+
+# No reboot after 15 minutes without a Home Assistant client or without WiFi.
+# The clock works without either, and a reboot without WiFi loses the time.
 api:
+  reboot_timeout: 0s
 
 ota:
   - platform: esphome
@@ -38,6 +50,7 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  reboot_timeout: 0s
   ap:
     ssid: ${friendly_name} Setup
 

@@ -13,6 +13,15 @@ accelerometer in Home Assistant.
   hostname (`pocuter-xxxxxx.local`).
 - API without encryption or password, OTA (`platform: esphome`) without
   password, fallback access point `Pocuter Setup` without password.
+- `safe_mode` is disabled, so the clock starts on every power-up regardless
+  of what happened before. ESPHome's safe mode counts boots that end within a
+  minute, in flash, and after 10 of them starts only WiFi and OTA for 5
+  minutes with a dark display. A battery running flat resets the board
+  exactly like that. The price is no OTA rollback: a build that crashes needs
+  USB to recover.
+- No reboot after 15 minutes without Home Assistant or WiFi
+  (`reboot_timeout: 0s` on `api:` and `wifi:`). The clock works without
+  both, and a reboot without WiFi would lose the time.
 - Logs and USB flashing go over the ESP32-C3's native USB port (`303a:1001`,
   `/dev/ttyACM0` on Linux). The board has no USB serial chip; auto reset into
   the bootloader works, no button needed.
@@ -53,8 +62,8 @@ venv/bin/esptool --port /dev/ttyACM0 --no-stub read-flash 0 0x400000 pocuter-ori
 venv/bin/esptool --port /dev/ttyACM0 write-flash 0 pocuter-original.bin   # restore
 ```
 
-A build that breaks WiFi needs USB again; the fallback access point is the
-safety net.
+A build that breaks WiFi or crashes needs USB again; the fallback access
+point covers wrong WiFi credentials only.
 
 ## Adding to your ESPHome / Home Assistant
 
