@@ -16,6 +16,9 @@ accelerometer in Home Assistant.
 - Logs and USB flashing go over the ESP32-C3's native USB port (`303a:1001`,
   `/dev/ttyACM0` on Linux). The board has no USB serial chip; auto reset into
   the bootloader works, no button needed.
+- Besides the three front buttons there are two small ones: reset next to the
+  USB port, and BOOT near the header pins. Hold BOOT while pressing reset to
+  force the bootloader.
 
 ## Files
 
@@ -113,7 +116,7 @@ then enter the key in Home Assistant.
 
 | Function | GPIO | Notes |
 |---|---|---|
-| I2C SDA / SCL | 8 / 9 | 400 kHz, 2.7k pullups. AW9523B at **0x5B**, MXC4005XC at 0x15. GPIO9 is also the BOOT strap (switch B4 on the schematic) |
+| I2C SDA / SCL | 8 / 9 | 400 kHz, 2.7k pullups. AW9523B at **0x5B**, MXC4005XC at 0x15. GPIO9 is also the BOOT strap: the small button near the header pins |
 | SPI CLK / MOSI / MISO | 5 / 6 / 10 | OLED and micro SD. `ssd1331_spi` at 8 MHz |
 | AW9523B INT | 20 | Open drain, 10k pullup. UART0 RX, hence logs over USB |
 | SD CS | 21 | Not used. UART0 TX |

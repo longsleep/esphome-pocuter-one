@@ -60,7 +60,7 @@ time:
 i2c:
   id: bus_i2c
   sda: GPIO8
-  scl: GPIO9  # also the BOOT strap, the unmarked fifth switch shorts it to GND
+  scl: GPIO9  # also the BOOT strap; the button near the header pins shorts it to GND
   frequency: 400kHz
 
 # Shared by the OLED and the micro SD slot (CS GPIO21). The OLED is write only.
@@ -174,7 +174,8 @@ interval:
             - component.update: oled
 
 # No behavior attached to the buttons on purpose. Home Assistant is the control
-# surface. The two unlabeled switches next to them are EN (reset) and BOOT.
+# surface. The small button next to USB is reset (EN), the one near the header
+# pins is BOOT (GPIO9); neither is visible to the firmware.
 binary_sensor:
   - platform: gpio
     id: button_1
