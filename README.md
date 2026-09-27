@@ -84,6 +84,10 @@ then enter the key in Home Assistant.
   no colon. Once a second the number drops from 50 px to 40 px for 150 ms and
   back, a beat instead of a blinking colon. Both sizes are exact multiples of
   the font's 10 unit pixel grid, so they stay sharp at 1 bpp.
+- From second 30 of every minute the English weekday name scrolls through
+  in the same font: the clock slides out to the left, the name follows, and
+  the clock slides back in to its usual place, at 60 px/s (about 4 to 5
+  seconds). The beat pauses meanwhile.
 - 50 px is the largest such size where the widest time (23:39, 86 px) fits.
   The digits are proportional, so the number is centred as a whole and moves
   a little as the time changes.
@@ -92,7 +96,8 @@ then enter the key in Home Assistant.
 - Dot bottom right: green with a Home Assistant client connected, amber on
   WiFi only, red offline.
 - The display has no `update_interval`; an `interval` draws the two frames of
-  each beat (about 33 ms each) and skips them while the Display switch is
+  each beat (about 33 ms each), a 40 ms `interval` draws the ticker at about
+  25 fps while it runs, and both skip drawing while the Display switch is
   off. Fonts are Google fonts downloaded at compile time, so compiling needs
   internet.
 

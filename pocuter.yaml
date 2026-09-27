@@ -168,10 +168,24 @@ globals:
   - id: clock_pulse
     type: bool
     initial_value: "false"
+  # millis() when the weekday ticker started, 0 while it is not running, and
+  # the minute it last ran in, so it runs once per minute.
+  - id: ticker_start
+    type: uint32_t
+    initial_value: "0"
+  - id: ticker_minute
+    type: int
+    initial_value: "-1"
 
 # The display has no update_interval of its own. Once a second it draws the
 # time at 40px, then 150ms later at the normal 50px, so the number beats.
 # Two frames a second, about 33ms each at 8MHz SPI.
+#
+# From second 30 of every minute the weekday name scrolls through instead:
+# the clock slides out to the left, the name follows, and the clock slides
+# back in to where it started. The beat pauses meanwhile, and the 40ms
+# interval draws about 25 frames a second until the display lambda ends it.
+#
 # Nothing draws while the Display switch is off.
 interval:
   - interval: 1s
@@ -180,10 +194,32 @@ interval:
           condition:
             switch.is_on: oled_power
           then:
-            - lambda: id(clock_pulse) = true;
-            - component.update: oled
-            - delay: 150ms
-            - lambda: id(clock_pulse) = false;
+            - lambda: |-
+                auto now = id(ha_time).now();
+                if (!now.is_valid())
+                  now = id(sntp_time).now();
+                if (id(ticker_start) == 0 && now.is_valid() && now.second >= 30 &&
+                    now.second < 35 && now.minute != id(ticker_minute)) {
+                  id(ticker_minute) = now.minute;
+                  id(ticker_start) = millis() | 1;
+                }
+            - if:
+                condition:
+                  lambda: return id(ticker_start) == 0;
+                then:
+                  - lambda: id(clock_pulse) = true;
+                  - component.update: oled
+                  - delay: 150ms
+                  - lambda: id(clock_pulse) = false;
+                  - component.update: oled
+  - interval: 40ms
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: oled_power
+              - lambda: return id(ticker_start) != 0;
+          then:
             - component.update: oled
 
 # No behavior attached to the buttons on purpose. Home Assistant is the control
@@ -368,7 +404,8 @@ font:
   - file: gfonts://Jersey 10
     id: font_time
     size: 50
-    glyphs: "0123456789-"
+    # Digits plus every letter of the English weekday names.
+    glyphs: "0123456789-FMSTWadehinorstuy"
   # The pulse frame. 40px is 4x the pixel grid, so it is just as sharp.
   - file: gfonts://Jersey 10
     id: font_time_pulse
@@ -415,10 +452,36 @@ display:
       bool pulse = id(clock_pulse);
       auto *font = pulse ? id(font_time_pulse) : id(font_time);
       int baseline = pulse ? 38 : 41;
-      if (now.is_valid()) {
-        it.strftime(48, baseline, font, Color(255, 255, 255), TextAlign::BASELINE_CENTER, "%H%M", now);
-      } else {
-        it.print(48, baseline, font, Color(120, 120, 120), TextAlign::BASELINE_CENTER, "----");
+      Color white(255, 255, 255);
+      // Weekday ticker: one strip scrolled left, clock, gap, weekday, gap,
+      // clock. It starts and ends with the clock exactly where it normally
+      // sits, so the last frame hands over to the plain clock seamlessly.
+      bool scrolling = false;
+      if (id(ticker_start) != 0 && now.is_valid()) {
+        static const int GAP = 24;
+        static const int SPEED = 60;  // px per second
+        std::string clock = now.strftime("%H%M");
+        std::string day = now.strftime("%A");
+        int x1, y1, w_clock, w_day, h;
+        it.get_text_bounds(0, 0, clock.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_clock, &h);
+        it.get_text_bounds(0, 0, day.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_day, &h);
+        int total = w_clock + GAP + w_day + GAP;
+        int off = (millis() - id(ticker_start)) * SPEED / 1000;
+        if (off < total) {
+          int x = 48 - w_clock / 2 - off;
+          it.print(x, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
+          it.print(x + w_clock + GAP, 41, id(font_time), white, TextAlign::BASELINE_LEFT, day.c_str());
+          it.print(x + total, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
+          scrolling = true;
+        }
+      }
+      if (!scrolling) {
+        id(ticker_start) = 0;
+        if (now.is_valid()) {
+          it.strftime(48, baseline, font, white, TextAlign::BASELINE_CENTER, "%H%M", now);
+        } else {
+          it.print(48, baseline, font, Color(120, 120, 120), TextAlign::BASELINE_CENTER, "----");
+        }
       }
 
       // Voltage only once a cell is known to be there, so a board without one
