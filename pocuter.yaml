@@ -8,19 +8,14 @@ esphome:
   # One file for every board. Each one comes up as pocuter-xxxxxx, the last
   # three bytes of its MAC, so they do not fight over one hostname.
   name_add_mac_suffix: true
-  # A restored number does not run its set_action, so the saved display
-  # brightness is applied here, once everything including the display is up.
-  # A value saved before the range was narrowed is clamped into it and saved.
+  # The Display light restores its state before the display is set up, too
+  # early to send it contrast commands. From here on its changes apply
+  # directly.
   on_boot:
     priority: -100
     then:
-      - lambda: |-
-          auto *n = id(display_brightness);
-          float b = std::isnan(n->state) ? 35.0f
-                                         : clamp(n->state, n->traits.get_min_value(), n->traits.get_max_value());
-          if (b != n->state)
-            n->make_call().set_value(b).perform();
-          id(oled)->set_brightness(b / 100.0f);
+      - lambda: id(display_ready) = true;
+      - script.execute: apply_display_light
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -135,23 +130,6 @@ aw9523b:
 #   7  P0_7  OLED CS                15  P1_7  header P3
 
 switch:
-  # Enables the boost converter that makes the 12.5V OLED panel supply. The
-  # controller answers every command without it, so a missing enable looks
-  # like a dead display. Off means the panel is dark and draws nothing. The
-  # controller keeps its RAM on 3.3V, so the picture comes back as it was. The
-  # interval that drives the display skips its frames while this is off, since
-  # each one blocks the main loop on SPI and expander writes.
-  - platform: gpio
-    id: oled_power
-    name: Display
-    icon: mdi:monitor
-    restore_mode: RESTORE_DEFAULT_ON
-    pin:
-      aw9523b_id: expander
-      number: 2
-      mode:
-        output: true
-
   # What the clock does besides showing the time. Restored across reboots.
   - platform: template
     id: clock_beat
@@ -176,6 +154,37 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
 
 output:
+  # Enables the boost converter that makes the 12.5V OLED panel supply. The
+  # controller answers every command without it, so a missing enable looks
+  # like a dead display. Off means the panel is dark and draws nothing. The
+  # controller keeps its RAM on 3.3V, so the picture comes back as it was.
+  # Driven by the Display light.
+  - platform: gpio
+    id: oled_power
+    pin:
+      aw9523b_id: expander
+      number: 2
+      mode:
+        output: true
+
+  # The Display light needs outputs, but its colour and brightness are read
+  # straight from the light by the display lambda and apply_display_light.
+  - platform: template
+    id: clock_red
+    type: float
+    write_action:
+      - lambda: ""
+  - platform: template
+    id: clock_green
+    type: float
+    write_action:
+      - lambda: ""
+  - platform: template
+    id: clock_blue
+    type: float
+    write_action:
+      - lambda: ""
+
   # LED mode pins sink a constant current, and the LED is common anode to 3.3V,
   # so a higher value is a brighter LED. No inversion.
   - platform: aw9523b
@@ -192,6 +201,36 @@ output:
     pin: 0
 
 light:
+  # The whole display as one light: on/off is the panel supply, the colour is
+  # the colour of the clock and the ticker, and brightness 1-100% maps to the
+  # SSD1331 colour contrasts 1-40%. 100% contrast would be the panel's nominal
+  # setting, rated 10,000 hours to half brightness; a clock lights the same
+  # pixels all day and burns them in, so 40% is the ceiling for all-day use.
+  # The default, 87%, is 35% contrast. No transitions: every step would need a
+  # full redraw.
+  - platform: rgb
+    id: display_light
+    name: Display
+    icon: mdi:monitor
+    red: clock_red
+    green: clock_green
+    blue: clock_blue
+    restore_mode: RESTORE_DEFAULT_ON
+    initial_state:
+      state: true
+      brightness: 87%
+      red: 100%
+      green: 100%
+      blue: 100%
+    default_transition_length: 0s
+    gamma_correct: 1.0
+    on_turn_on:
+      - output.turn_on: oled_power
+    on_turn_off:
+      - output.turn_off: oled_power
+    on_state:
+      - script.execute: apply_display_light
+
   - platform: rgb
     id: led
     name: LED
@@ -214,6 +253,9 @@ globals:
   - id: clock_pulse
     type: bool
     initial_value: "false"
+  - id: display_ready
+    type: bool
+    initial_value: "false"
   # The ticker: millis() when it started (0 while it is not running), the
   # text it scrolls, a message from Home Assistant waiting for its turn, and
   # the minute the weekday last ran in, so that runs once per minute.
@@ -232,6 +274,8 @@ globals:
 # time at 40px, then 150ms later at the normal 50px, so the number beats.
 # Two frames a second, about 33ms each at 8MHz SPI.
 #
+# Nothing draws while the Display light is off.
+#
 # The Clock Beat, Weekday Ticker and Date Ticker switches below turn the
 # parts off; without the beat the clock simply redraws once a second.
 #
@@ -241,14 +285,12 @@ globals:
 # way, once, as soon as no ticker is running; the weekday then waits for it
 # until second 35 at the latest. The beat pauses meanwhile, and the 40ms
 # interval draws about 25 frames a second until the display lambda ends it.
-#
-# Nothing draws while the Display switch is off.
 interval:
   - interval: 1s
     then:
       - if:
           condition:
-            switch.is_on: oled_power
+            light.is_on: display_light
           then:
             - lambda: |-
                 auto now = id(ha_time).now();
@@ -293,7 +335,7 @@ interval:
       - if:
           condition:
             and:
-              - switch.is_on: oled_power
+              - light.is_on: display_light
               - lambda: return id(ticker_start) != 0;
           then:
             - component.update: oled
@@ -471,6 +513,18 @@ sensor:
 # punctuation from Home Assistant becomes ASCII, and every other character the
 # clock font lacks is dropped: drawing one would log a warning twice per frame.
 script:
+  # Contrast from the Display light's brightness, then a redraw for its
+  # colour. Contrast is a few commands and needs the display set up.
+  - id: apply_display_light
+    then:
+      - lambda: |-
+          if (!id(display_ready))
+            return;
+          auto &v = id(display_light).remote_values;
+          id(oled)->set_brightness(0.01f + 0.39f * v.get_brightness());
+          if (v.is_on())
+            id(oled)->update();
+
   - id: queue_ticker_message
     parameters:
       message: string
@@ -514,28 +568,24 @@ script:
           }
           id(ticker_pending) = out;
 
-# Scales the three SSD1331 colour contrasts, a few commands and no redraw.
-# 100% is the panel datasheet's nominal setting (80-100 cd/m2 white), rated
-# 10,000 hours to half brightness. A clock lights the same pixels all day, so
-# those wear unevenly and burn in; 40% is the ceiling for all-day use and 35%
-# the default. Very low values dim unevenly, since each colour's contrast is
-# rounded to whole steps.
-number:
+select:
+  # How the clock uses the Display light's colour: all of it, hours in the
+  # colour and minutes white, or fading from the colour at the top to a
+  # darker shade of it at the bottom. The ticker follows.
   - platform: template
-    id: display_brightness
-    name: Display Brightness
-    icon: mdi:brightness-6
+    id: clock_style
+    name: Clock Style
+    icon: mdi:palette
     entity_category: config
-    unit_of_measurement: "%"
-    mode: slider
-    min_value: 1
-    max_value: 40
-    step: 1
-    initial_value: 35
+    options:
+      - Solid
+      - Two-tone
+      - Gradient
+    initial_option: Solid
     optimistic: true
     restore_value: true
     set_action:
-      - lambda: id(oled)->set_brightness(x / 100.0f);
+      - component.update: oled
 
 # The dashboard way to send a ticker message: setting it, even to the same
 # text again, scrolls it through once.
@@ -555,6 +605,25 @@ button:
   - platform: restart
     name: Restart
     entity_category: config
+  # Everything that changes how the clock looks and behaves, back to the
+  # defaults: white, 35% contrast, solid, beat and weekday on, date off.
+  - platform: template
+    name: Reset Clock Settings
+    icon: mdi:restore
+    entity_category: config
+    on_press:
+      - light.turn_on:
+          id: display_light
+          brightness: 87%
+          red: 100%
+          green: 100%
+          blue: 100%
+      - select.set:
+          id: clock_style
+          option: Solid
+      - switch.turn_on: clock_beat
+      - switch.turn_on: weekday_ticker
+      - switch.turn_off: date_ticker
 
 font:
   # Jersey 10 is drawn on a 10 unit pixel grid. At 50px every font pixel is
@@ -598,7 +667,7 @@ display:
     # Proven on this panel. The Pocuter library pushes 80MHz, the SSD1331
     # datasheet says 6.6MHz. 40MHz raises a full frame from 30 to 42 fps.
     data_rate: 8MHz
-    # Only the value until on_boot applies the Display Brightness number.
+    # Only the value until on_boot applies the Display light's brightness.
     brightness: 35%
     update_interval: never
     lambda: |-
@@ -610,9 +679,52 @@ display:
       // moves slightly as the time changes. Both sizes centre their digits on
       // y 27: baseline 41 for the 28px tall 50px font, 38 for the 21px 40px.
       bool pulse = id(clock_pulse);
-      auto *font = pulse ? id(font_time_pulse) : id(font_time);
+      auto *clock_font = pulse ? id(font_time_pulse) : id(font_time);
       int baseline = pulse ? 38 : 41;
+
+      // Colour from the Display light, style from Clock Style: 0 solid, 1
+      // two-tone (hours in the colour, minutes white), 2 gradient (the colour
+      // at the top fading to 40% of it at the bottom). The ticker follows.
+      auto &light = id(display_light).current_values;
+      Color main(uint8_t(light.get_red() * 255), uint8_t(light.get_green() * 255), uint8_t(light.get_blue() * 255));
       Color white(255, 255, 255);
+      size_t style = id(clock_style).active_index().value_or(0);
+      auto width = [&](font::Font *f, const char *text) {
+        int x1, y1, w, h;
+        it.get_text_bounds(0, 0, text, f, TextAlign::BASELINE_LEFT, &x1, &y1, &w, &h);
+        return w;
+      };
+      // Text left-aligned on a baseline. The gradient is the text drawn once
+      // per horizontal band over the cap height, each band clipped to its
+      // rows; the outer bands reach the screen edges for accents and
+      // descenders. That costs CPU only, about 1.3ms per band and string.
+      auto draw = [&](int x, int y, font::Font *f, const char *text) {
+        if (style != 2) {
+          it.print(x, y, f, main, TextAlign::BASELINE_LEFT, text);
+          return;
+        }
+        static const int BANDS = 5;
+        int top = y - f->get_capheight();
+        for (int i = 0; i < BANDS; i++) {
+          float k = 1.0f - 0.6f * i / (BANDS - 1);
+          Color c(uint8_t(main.r * k), uint8_t(main.g * k), uint8_t(main.b * k));
+          int y0 = i == 0 ? 0 : top + (y - top) * i / BANDS;
+          int y1 = i == BANDS - 1 ? it.get_height() : top + (y - top) * (i + 1) / BANDS;
+          it.start_clipping(0, y0, it.get_width(), y1);
+          it.print(x, y, f, c, TextAlign::BASELINE_LEFT, text);
+          it.end_clipping();
+        }
+      };
+      auto draw_clock = [&](int x, int y, font::Font *f, const std::string &hhmm) {
+        if (style == 1 && hhmm.size() == 4) {
+          std::string hours = hhmm.substr(0, 2);
+          it.print(x, y, f, main, TextAlign::BASELINE_LEFT, hours.c_str());
+          it.print(x + width(f, hours.c_str()), y, f, white, TextAlign::BASELINE_LEFT, hhmm.c_str() + 2);
+        } else {
+          draw(x, y, f, hhmm.c_str());
+        }
+      };
+
       // Ticker: one strip scrolled left, clock, gap, text, gap, clock. It
       // starts and ends with the clock exactly where it normally sits, so the
       // last frame hands over to the plain clock seamlessly.
@@ -622,25 +734,30 @@ display:
         static const int SPEED = 60;  // px per second
         std::string clock = now.is_valid() ? now.strftime("%H%M") : "----";
         const std::string &text = id(ticker_text);
-        int x1, y1, w_clock, w_text, h;
-        it.get_text_bounds(0, 0, clock.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_clock, &h);
-        it.get_text_bounds(0, 0, text.c_str(), id(font_time), TextAlign::BASELINE_LEFT, &x1, &y1, &w_text, &h);
+        int w_clock = width(id(font_time), clock.c_str());
+        int w_text = width(id(font_time), text.c_str());
         int total = w_clock + GAP + w_text + GAP;
         int off = (millis() - id(ticker_start)) * SPEED / 1000;
         if (off < total) {
+          // Only what is on screen: every draw costs, even fully clipped.
+          auto visible = [&](int x, int w) { return x + w > 0 && x < it.get_width(); };
           int x = 48 - w_clock / 2 - off;
-          it.print(x, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
-          it.print(x + w_clock + GAP, 41, id(font_time), white, TextAlign::BASELINE_LEFT, text.c_str());
-          it.print(x + total, 41, id(font_time), white, TextAlign::BASELINE_LEFT, clock.c_str());
+          if (visible(x, w_clock))
+            draw_clock(x, 41, id(font_time), clock);
+          if (visible(x + w_clock + GAP, w_text))
+            draw(x + w_clock + GAP, 41, id(font_time), text.c_str());
+          if (visible(x + total, w_clock))
+            draw_clock(x + total, 41, id(font_time), clock);
           scrolling = true;
         }
       }
       if (!scrolling) {
         id(ticker_start) = 0;
         if (now.is_valid()) {
-          it.strftime(48, baseline, font, white, TextAlign::BASELINE_CENTER, "%H%M", now);
+          std::string clock = now.strftime("%H%M");
+          draw_clock(48 - width(clock_font, clock.c_str()) / 2, baseline, clock_font, clock);
         } else {
-          it.print(48, baseline, font, Color(120, 120, 120), TextAlign::BASELINE_CENTER, "----");
+          it.print(48, baseline, clock_font, Color(120, 120, 120), TextAlign::BASELINE_CENTER, "----");
         }
       }
 

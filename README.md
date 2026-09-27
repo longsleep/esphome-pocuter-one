@@ -95,6 +95,11 @@ then enter the key in Home Assistant.
   second 30. Without the beat the clock just redraws once a second.
 - A message from Home Assistant scrolls through the same way, once, as soon
   as no ticker is running, see [Ticker messages](#ticker-messages).
+- Colour: the Display light's colour, applied by Clock Style as Solid,
+  Two-tone (hours in the colour, minutes white) or Gradient (the colour at
+  the top fading to 40 % of it at the bottom). The ticker follows. See the
+  studies in `mockups/colors-*.png`. The defaults, white and Solid, are the
+  original look; Reset Clock Settings returns to them.
 - 50 px is the largest such size where the widest time (23:39, 86 px) fits.
   The digits are proportional, so the number is centred as a whole and moves
   a little as the time changes.
@@ -104,7 +109,7 @@ then enter the key in Home Assistant.
   WiFi only, red offline.
 - The display has no `update_interval`; an `interval` draws the two frames of
   each beat (about 33 ms each), a 40 ms `interval` draws the ticker at about
-  25 fps while it runs, and both skip drawing while the Display switch is
+  25 fps while it runs, and both skip drawing while the Display light is
   off. Fonts are Google fonts downloaded at compile time, so compiling needs
   internet.
 
@@ -134,7 +139,8 @@ data:
 
 | Entity | Type | Notes |
 |---|---|---|
-| Display | switch | 12.5 V panel supply; off also stops drawing. The picture comes back as it was |
+| Display | light (RGB) | On/off: 12.5 V panel supply, off also stops drawing. Colour: the clock. Brightness 1–100 % maps to 1–40 % panel contrast, see [Display](#display). Default on, white, 87 % (35 % contrast); restored across reboots |
+| Clock Style | select (config) | Solid / Two-tone / Gradient, see [Clock](#clock) |
 | LED | light (RGB) | AW9523B LED current mode, pulse effect |
 | Button 1–3 | binary sensor | Pressed state, 20 ms debounce, no behavior attached |
 | Charging | binary sensor | Charger STAT low for more than 1 s, see [Battery](#battery) |
@@ -145,9 +151,9 @@ data:
 | Board Temperature | sensor (diagnostic) | The accelerometer's die, tracks the board rather than the room |
 | SD Card | binary sensor (diagnostic) | Card detect only |
 | WiFi Signal | sensor (diagnostic) | |
-| Display Brightness | number (config, %) | 1–40, default 35, restored across reboots. Scales the SSD1331 colour contrasts; very low values dim unevenly. See [Display](#display) |
 | Clock Beat / Weekday Ticker / Date Ticker | switch (config) | See [Clock](#clock); on / on / off by default, restored across reboots |
 | Ticker Message | text | See [Ticker messages](#ticker-messages) |
+| Reset Clock Settings | button (config) | Display on, white, 87 %; Clock Style Solid; Clock Beat and Weekday Ticker on, Date Ticker off |
 | Restart | button (config) | Orderly reboot |
 
 ### Not exposed
@@ -214,14 +220,19 @@ Also needed on this board:
   ESPHome's `ssd1331_spi` adds a 1 ms delay per command. Measured with a
   free-running display: 30 fps at 8 MHz SPI, 42 fps at 40 MHz. About 21 ms per
   frame is that fixed overhead, and a free-running display owns the main loop.
-- Display Brightness changes the brightness without a redraw. Its 100 %
-  would be the panel datasheet's nominal setting (80–100 cd/m² white), rated
-  for 10,000 hours to half brightness. A clock lights the same pixels all day,
-  and they wear unevenly: the digits burn in. So the range stops at 40 %,
-  the ceiling for all-day use, and defaults to 35 %. Dimming it further at
-  night, or turning the Display switch off when nobody looks, adds lifetime
-  on top.
-- The switches and the brightness are saved to flash at most once a minute
+- The Display light's brightness sets the SSD1331 colour contrasts, without a
+  redraw. 100 % panel contrast would be the datasheet's nominal setting
+  (80–100 cd/m² white), rated for 10,000 hours to half brightness. A clock
+  lights the same pixels all day, and they wear unevenly: the digits burn in.
+  So the light's 100 % is 40 % contrast, the ceiling for all-day use, and the
+  default 87 % is 35 %. Dimming it further at night, or turning it off when
+  nobody looks, adds lifetime on top. Colours without blue (amber, red,
+  green) light fewer sub-pixels than white and probably wear the panel
+  least. Very low brightness dims the colours unevenly, since each colour's
+  contrast is rounded to whole steps.
+- The gradient draws each text once per band (5 bands), about 1.3 ms per band
+  and string, so the ticker only draws what is on screen.
+- The switches and the light are saved to flash at most once a minute
   (ESPHome's default `flash_write_interval`). A change followed by a power
   loss within that minute is lost; the Restart button saves first.
 
